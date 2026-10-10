@@ -218,6 +218,12 @@ uint32_t ShaderPixelParameterLocation(const ShaderPixelInputInfo& info,
 bool     ShaderPixelParameterIsFlat(const ShaderPixelInputInfo& info, uint32_t input);
 bool     ShaderPixelParameterIsCustom(const ShaderPixelInputInfo& info, uint32_t input);
 
+// Whether the host device can run SPIR-V that uses VK_KHR_fragment_shader_barycentric
+// (PerVertexKHR inputs and gl_BaryCoord*KHR). When false the recompiler falls back to ordinary
+// hardware-interpolated varyings, which is exact for the common v_interp_p1/p2 sequences.
+bool     ShaderFragmentBarycentricSupported();
+void     ShaderSetFragmentBarycentricSupported(bool supported);
+
 struct ShaderSharp {
 	uint16_t offset_dw : 15;
 	uint16_t size      : 1;

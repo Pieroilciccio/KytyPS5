@@ -2,6 +2,8 @@
 
 #include "common/assert.h"
 
+#include <atomic>
+
 namespace Libs::Graphics {
 
 namespace {
@@ -9,7 +11,20 @@ namespace {
 constexpr uint32_t PsInputOffsetMask = 0x0000001fu;
 constexpr uint32_t PsInputFlatShade  = 0x00000400u;
 
+// Defaults to true so tools and tests that never create a Vulkan device keep the original
+// (VK_KHR_fragment_shader_barycentric) code generation. The window code overrides it once the
+// device is created.
+std::atomic<bool> g_fragment_barycentric_supported {true};
+
 } // namespace
+
+bool ShaderFragmentBarycentricSupported() {
+	return g_fragment_barycentric_supported.load(std::memory_order_relaxed);
+}
+
+void ShaderSetFragmentBarycentricSupported(bool supported) {
+	g_fragment_barycentric_supported.store(supported, std::memory_order_relaxed);
+}
 
 uint32_t ShaderPixelExportTarget(uint32_t shader_mask, uint32_t export_index) {
 	for (uint32_t target = 0; target < 8u; target++) {

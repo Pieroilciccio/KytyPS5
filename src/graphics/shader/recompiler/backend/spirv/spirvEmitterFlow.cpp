@@ -226,6 +226,12 @@ uint32_t EmitInterpolationParameter(ValueEmitContext& ctx, uint32_t attr, uint32
 	auto&       state = ctx.state;
 	const auto* input = InputBindingForParameter(state, attr);
 	if (!input->per_vertex) {
+		if (!ShaderFragmentBarycentricSupported() && mode < 2u && !PixelParameterIsCustom(state, attr)) {
+			// Fallback without raw vertices: the guest computes P0 + I*P10 + J*P20. Provide the
+			// hardware-interpolated value as P0 (mode 2) and zero deltas (modes 0/1), so the
+			// guest's own math reproduces the interpolated attribute for any I/J.
+			return ConstantU32(state, 0);
+		}
 		return EmitAttribute(ctx.state, attr, chan);
 	}
 	const auto load_vertex = [&](uint32_t vertex) {

@@ -19,6 +19,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/presentation/window/windowInternal.h"
+#include "graphics/shader/shader.h"
 #include "kernel/memory.h"
 #include "libs/controller.h"
 #include "loader/systemContent.h"
@@ -218,9 +219,20 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 #if defined(__APPLE__)
 		features12.pNext = &depth_clip_control;
 #else
+		// VK_KHR_fragment_shader_barycentric is optional: Pascal and older GPUs (e.g. GTX 10xx)
+		// lack it. Only chain its feature struct when the device exposes the extension.
+		const auto candidate_extensions = EnumerateVulkan<vk::ExtensionProperties>(
+		    "vkEnumerateDeviceExtensionProperties",
+		    [&](uint32_t* count, vk::ExtensionProperties* values) {
+			    return device.enumerateDeviceExtensionProperties(nullptr, count, values);
+		    });
+		const bool has_barycentric_extension =
+		    HasExtension(candidate_extensions, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
 		vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR fragment_barycentric {};
 		fragment_barycentric.pNext = &depth_clip_control;
-		features12.pNext           = &fragment_barycentric;
+		features12.pNext           = has_barycentric_extension
+		                                 ? static_cast<void*>(&fragment_barycentric)
+		                                 : static_cast<void*>(&depth_clip_control);
 #endif
 		features11.pNext       = features12.pNext;
 		features12.pNext       = &features11;
@@ -262,7 +274,12 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 #endif
 #if !defined(__APPLE__)
 		check_feature(device_features2.features.depthClamp, "depthClamp");
-		check_feature(fragment_barycentric.fragmentShaderBarycentric, "fragmentShaderBarycentric");
+		if (!has_barycentric_extension || fragment_barycentric.fragmentShaderBarycentric != VK_TRUE) {
+			// Not fatal: the shader recompiler falls back to hardware-interpolated varyings.
+			LOGF("fragmentShaderBarycentric is not supported on %s: using the interpolation "
+			     "fallback\n",
+			     device_properties.deviceName.data());
+		}
 #endif
 
 		check_feature(features12.samplerMirrorClampToEdge, "samplerMirrorClampToEdge",
@@ -485,8 +502,26 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 		image_atomic_int64.pNext = supported_features2.pNext;
 		supported_features2.pNext = &image_atomic_int64;
 	}
+#if !defined(__APPLE__)
+	const bool barycentric_extension =
+	    HasExtension(device_extensions, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+	vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR supported_barycentric {};
+	if (barycentric_extension) {
+		supported_barycentric.pNext = supported_features2.pNext;
+		supported_features2.pNext   = &supported_barycentric;
+	}
+#endif
 	physical_device.getFeatures2(&supported_features2);
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
+#if !defined(__APPLE__)
+	const bool barycentric_enabled =
+	    barycentric_extension && supported_barycentric.fragmentShaderBarycentric == VK_TRUE;
+	graphics.fragment_shader_barycentric_enabled = barycentric_enabled;
+	// Tell the shader recompiler before any shader is compiled.
+	ShaderSetFragmentBarycentricSupported(barycentric_enabled);
+	LOGF("Vulkan fragmentShaderBarycentric: %s\n",
+	     barycentric_enabled ? "native" : "unavailable, using interpolation fallback");
+#endif
 
 	auto features12 = WindowContext::RequiredVulkan12Features();
 	features12.shaderSharedInt64Atomics = supported_features12.shaderSharedInt64Atomics;
@@ -595,7 +630,10 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR fragment_barycentric {};
 	fragment_barycentric.pNext                     = &features12;
 	fragment_barycentric.fragmentShaderBarycentric = VK_TRUE;
-	robustness2.pNext                              = &fragment_barycentric;
+	// Only enable the barycentric feature when the device really supports it.
+	void* const after_robustness = barycentric_enabled ? static_cast<void*>(&fragment_barycentric)
+	                                                   : static_cast<void*>(&features12);
+	robustness2.pNext            = after_robustness;
 #endif
 	if (robustness2_ext_enabled) {
 		robustness2.robustBufferAccess2 = supported_robustness2.robustBufferAccess2;
@@ -609,7 +647,7 @@ static vk::Device VulkanCreateDevice(GraphicContext& graphics,
 	                                           : static_cast<void*>(&features12);
 #else
 	features13.pNext = robustness2_ext_enabled ? static_cast<void*>(&robustness2)
-	                                           : static_cast<void*>(&fragment_barycentric);
+	                                           : after_robustness;
 #endif
 	features13.robustImageAccess   = supported_features13.robustImageAccess;
 	features13.subgroupSizeControl =
@@ -948,7 +986,7 @@ void WindowContext::CreateVulkan() {
 #else
 	device_extensions.push_back(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
 	device_extensions.push_back(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
-	device_extensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+	// VK_KHR_fragment_shader_barycentric is optional and enabled below when available.
 #endif
 
 #ifdef KYTY_ENABLE_DEBUG_PRINTF
@@ -1016,6 +1054,11 @@ void WindowContext::CreateVulkan() {
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_EXTENSION_NAME);
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
 		}
+#if !defined(__APPLE__)
+		if (HasExtension(available_extensions, VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME)) {
+			device_extensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
+		}
+#endif
 	}
 
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, device_extensions);

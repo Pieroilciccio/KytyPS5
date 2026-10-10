@@ -110,6 +110,12 @@ void CollectPixelInputs(const ShaderPixelInputInfo* pixel, ShaderInfo& info,
 			}
 		}
 	}
+	if (!ShaderFragmentBarycentricSupported()) {
+		// Without VK_KHR_fragment_shader_barycentric there are no raw per-vertex inputs. Every
+		// parameter becomes an ordinary (flat or hardware-interpolated) varying; this is exact for
+		// the usual v_interp_p1/p2 sequences. Shaders that need raw vertices degrade gracefully.
+		per_vertex.fill(false);
+	}
 	for (uint32_t input = 0; input < pixel->input_num; input++) {
 		AddInput(info, StageInputKind::Parameter, input, 4, fmt::format("in_param_{}", input),
 		         per_vertex[input]);
@@ -163,14 +169,21 @@ void AddBuiltinInput(ShaderInfo& info, StageInputKind kind) {
 		case StageInputKind::Layer: AddInput(info, kind, 0, 1, "gl_Layer"); break;
 		case StageInputKind::SampleId: AddInput(info, kind, 0, 1, "gl_SampleID"); break;
 		case StageInputKind::BaryCoordSmoothSample:
-			AddInput(info, StageInputKind::SampleId, 0, 1, "gl_SampleID");
-			[[fallthrough]];
 		case StageInputKind::BaryCoordSmooth:
 		case StageInputKind::BaryCoordSmoothCentroid:
-			AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
-			break;
 		case StageInputKind::BaryCoordNoPerspective:
-			AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+			if (!ShaderFragmentBarycentricSupported()) {
+				// No input variable is created, so the emitter reads the guest I/J VGPRs as 0.
+				break;
+			}
+			if (kind == StageInputKind::BaryCoordSmoothSample) {
+				AddInput(info, StageInputKind::SampleId, 0, 1, "gl_SampleID");
+			}
+			if (kind == StageInputKind::BaryCoordNoPerspective) {
+				AddInput(info, kind, 0, 3, "gl_BaryCoordNoPerspKHR");
+			} else {
+				AddInput(info, StageInputKind::BaryCoordSmooth, 0, 3, "gl_BaryCoordKHR");
+			}
 			break;
 		case StageInputKind::WorkgroupId:
 			AddInput(info, kind, 0, 3, "gl_WorkGroupID");
